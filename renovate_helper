@@ -1,0 +1,193 @@
+#!/usr/local/bin/python3
+'''
+Helper to comment on renovate generated github commits
+
+Currently only deals with Chart.yamls
+'''
+import os
+import subprocess
+import logging
+
+from ghapi.all import GhApi
+from git import Repo, Actor
+#from diff_match_patch import diff_match_patch
+import difflib as dl
+
+
+COMMENT_HEADER='Renovate-helper bot would like to help'
+COMMENT_HEADER_VALUES='Renovate-helper bot has mangled values.yaml for you'
+
+def read_file(path):
+    with open(path,"r",encoding="utf8") as f:
+        contents = f.read()
+        return contents
+
+def write_file(path, contents):
+    with open(path,"w",encoding="utf8") as f:
+        f.write(contents)
+
+def fs_path(path):
+    return f"{checkoutPath}/{path}"
+
+def run_capture(cmd, directory, check=True):
+    return subprocess.run(args=[cmd],
+                          cwd=directory,
+                          capture_output=True,
+                          shell=True,
+                          check=check)
+
+
+def update_orig_values(chart_dir):
+    fs_chart_dir = fs_path(chart_dir)
+    logging.info(f"Building helm deps in {chart_dir}")
+    run_capture('helm dependency update', fs_chart_dir)
+    run_capture('tar -zxf *gz', f"{fs_chart_dir}/charts")
+    run_capture('cat charts/*/values.yaml | sed -r -e \'s/^(.*)/  \\1/g\' | sed -r -e \'s/^  $//g\' > orig-values.yaml', fs_chart_dir)
+    repo.index.add(fs_chart_dir+'/orig-values.yaml')
+
+def diff_with_sha(file_path, sha):
+    sha_file_path = f"{fs_path(file_path)}.other"
+
+    sha_file_contents = run_capture(f"git show {sha}:{file_path}", checkoutPath)
+    write_file(sha_file_path, sha_file_contents.stdout.decode('utf-8'))
+    diff = run_capture(f"diff -u {sha_file_path} {fs_path(file_path)}", checkoutPath, check=False)
+    os.unlink(sha_file_path)
+    return diff
+
+def update_values_comment(chart_dir):
+    rej_path = fs_path(f"{chart_dir}/values.yaml.rej")
+    if os.path.exists(rej_path):
+        rejects = read_file(rej_path)
+        comment="<details>\n<summary>I'm sorry, but I didn't patch values.yaml completely. Here are the patches which failed:</summary>\n\n```diff\n"
+        comment+=rejects
+        comment+="```\n</details>\n"
+        return comment
+
+def update_values(chart_dir, merge_base):
+    fs_chart_dir = fs_path(chart_dir)
+
+    values_path = f"{chart_dir}/values.yaml"
+    values_diff = diff_with_sha(values_path, merge_base)
+    logging.info(values_diff.stdout.decode('utf-8'))
+    # If values hasn't yet been mangled
+    if len(values_diff.stdout.decode('utf-8')) == 0:
+        logging.info(f"Attempting to update {values_path}")
+        orig_diff = diff_with_sha(f"{chart_dir}/orig-values.yaml", merge_base)
+        logging.info(orig_diff.stdout.decode('utf-8'))
+        patch_path = f"{fs_chart_dir}/patch"
+        write_file(patch_path, orig_diff.stdout.decode('utf-8'))
+        run_capture(f"patch -p0 {fs_path(values_path)} <{patch_path}", fs_chart_dir, check=False)
+        os.unlink(patch_path)
+        repo.index.add(fs_path(values_path))
+        return update_values_comment(chart_dir)
+    return ""
+
+def handle_chart(chart_path, merge_base):
+    '''
+    Try to see if a chart needs help. Do a git commit and return a comment if we can help.
+    '''
+    chart_dir = os.path.dirname(chart_path)
+    update_orig_values(chart_dir)
+    comment_values_update(update_values(chart_dir, merge_base))
+
+    fs_chart_dir = fs_path(os.path.dirname(chart_path))
+    nowlines = run_capture('wc -l orig-values.yaml', fs_chart_dir)
+    nowsplit = nowlines.stdout.decode('utf-8').split(" ")
+    nowlines = nowsplit[0]
+    diffstat = run_capture(f"git diff {merge_base} --numstat -- orig-values.yaml", fs_chart_dir, check=False)
+    diffsplit = diffstat.stdout.decode('utf-8').split("\t")
+    comment=f"\n\nChart in ```{os.path.dirname(chart_path)}```:\n"
+    if len(diffsplit)>1:
+        newlines = diffsplit[0]
+        dellines = diffsplit[1]
+        newpercent = (int(newlines)*100/int(nowlines))
+        comment+=f"Of {nowlines} lines now in the upstream values.yaml, {newlines} are added and {dellines} have been removed, something like {newpercent}% difference.\n"
+
+        comment+="<details>\n<summary>Here is the diff between our values.yaml and the new upstream values</summary>\n\n```diff\n"
+        result = run_capture('diff -U3 orig-values.yaml values.yaml', fs_chart_dir, check=False)
+        comment+=result.stdout.decode('utf-8')
+        comment+="```\n</details>\n"
+    else:
+        comment+="Upstream values.yaml has not changed\n"
+    return comment
+
+def try_commit_push():
+    '''
+    If the git index is dirty, then try commit+push
+    '''
+    commit_diff = repo.index.diff('HEAD')
+    if len(commit_diff) > 0:
+        author = Actor(GIT_NAME, GIT_EMAIL)
+        repo.index.commit("Renovate-helper: Automated update", author=author, committer=author)
+
+        repo.create_remote('httpsorigin', f"https://{token}@github.com/{GH_OWNER}/{appRepo}")
+        repo.remotes.httpsorigin.push().raise_if_error()
+
+def comment_values_update(new_comment):
+    if new_comment is not None and len(new_comment) >0 :
+        new_comment = COMMENT_HEADER_VALUES+"\n"+new_comment
+        api.issues.create_comment(issue_number=prNum,
+                                  body=new_comment)
+
+def comment_if_needed(new_comment):
+    '''
+    If the new_comment doesn't exist as a GH comment, or is different from
+    the one starting with COMMENT_HEADER create or update it
+    '''
+    if new_comment is not None and len(new_comment) >0 :
+        new_comment = COMMENT_HEADER+"\n"+new_comment
+        existing_comments = api.issues.list_comments(issue_number=prNum)
+        found_comment = False
+        for comment in existing_comments:
+            print(comment.body)
+            if comment.body.startswith(COMMENT_HEADER):
+                found_comment = True
+                if comment != new_comment:
+                    api.issues.update_comment(comment_id=comment.id,
+                                              body=new_comment)
+                break
+
+        if found_comment is False:
+            api.issues.create_comment(issue_number=prNum,
+                                      body=new_comment)
+
+def process_diff():
+    '''
+    Process the diff between where we are now and the target branch
+    '''
+    merge_base = repo.merge_base(gitSha, "origin/"+targetBranch)
+    diff = repo.head.commit.diff(merge_base)
+    comments = ""
+    for diff_modified in diff.iter_change_type('M'):
+        if os.path.basename(diff_modified.a_path) == 'Chart.yaml':
+            comments += handle_chart(diff_modified.a_path, merge_base[0].hexsha)
+    return comments
+
+def main():
+    '''
+    Main body
+    '''
+    helper_comment=process_diff()
+
+    print(helper_comment)
+    try_commit_push()
+    comment_if_needed(helper_comment)
+logging.basicConfig(level=logging.INFO)
+
+appRepo=os.environ['app_repo']
+gitSha=os.environ['git_sha']
+targetBranch=os.environ['target_branch']
+checkoutPath=os.environ['checkout_path']
+prNum=os.environ['pr_num']
+token=os.environ['GITHUB_TOKEN']
+GH_OWNER=os.environ['GH_OWNER']
+GIT_EMAIL=os.environ['GIT_EMAIL']
+GIT_NAME=os.environ['GIT_NAME']
+
+repo = Repo(checkoutPath)
+assert not repo.bare
+api = GhApi(token=token,
+            owner=GH_OWNER,
+            repo=appRepo)
+
+main()
