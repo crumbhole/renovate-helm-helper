@@ -174,11 +174,11 @@ def main():
     comment_if_needed(helper_comment)
 logging.basicConfig(level=logging.INFO)
 
-appRepo=os.environ['app_repo']
-gitSha=os.environ['git_sha']
-targetBranch=os.environ['target_branch']
-checkoutPath=os.environ['checkout_path']
-prNum=os.environ['pr_num']
+appRepo=os.environ['APP_REPO']
+gitSha=os.environ['GIT_SHA']
+targetBranch=os.environ['TARGET_BRANCH']
+checkoutPath=os.environ['CHECKOUT_PATH']
+prNum=os.environ['PR_NUM']
 token=os.environ['GITHUB_TOKEN']
 GH_OWNER=os.environ['GH_OWNER']
 GIT_EMAIL=os.environ['GIT_EMAIL']

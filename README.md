@@ -21,17 +21,17 @@ dependencies:
 Run this python/container using your CI after any renovate.
 Set the following environment variables:
 
-| Name         | Content                                                               |
-|--------------|-----------------------------------------------------------------------|
-| GITHUB_TOKEN | Token which can read and write to the repository and PRs               |
-| GH_OWNER     | The github organisation                                               |
-| GIT_EMAIL    | Email address to make commits as                                      |
-| GIT_NAME     | Name to make commits as                                               |
-| app_repo     | Repository name in github                                             |
-| gitSha       | The SHA1 to check                                                     |
-| targetBranch | The branch that the PR is being merged into (todo: read this from GH) |
-| checkoutPath | Local path for where to checkout the code to from github to examine   |
-| prNum        | Pull request number in github                                         |
+| Name          | Content                                                               |
+|---------------|-----------------------------------------------------------------------|
+| GITHUB_TOKEN  | Token which can read and write to the repository and PRs              |
+| GH_OWNER      | The github organisation                                               |
+| GIT_EMAIL     | Email address to make commits as                                      |
+| GIT_NAME      | Name to make commits as                                               |
+| APP_REPO      | Repository name in github                                             |
+| GIT_SHA       | The SHA1 to check                                                     |
+| TARGET_BRANCH | The branch that the PR is being merged into (todo: read this from GH) |
+| CHECKOUT_PATH | Local path for where to checkout the code to from github to examine   |
+| PR_NUM        | Pull request number in github                                         |
 
 `https://github.com/<GH_OWNER>/<app_repo>` is the path to your repository.
 
