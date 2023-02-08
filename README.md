@@ -33,7 +33,7 @@ Set the following environment variables:
 | CHECKOUT_PATH | Local path for where to checkout the code to from github to examine   |
 | PR_NUM        | Pull request number in github                                         |
 
-`https://github.com/<GH_OWNER>/<app_repo>` is the path to your repository.
+`https://github.com/<GH_OWNER>/<APP_REPO>` is the path to your repository.
 
 ## How does it help
 
