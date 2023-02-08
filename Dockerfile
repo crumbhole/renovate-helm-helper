@@ -1,4 +1,4 @@
-FROM docker.sendilab.net/proxy/library/python:3.11.1
+FROM python:3.11.1
 RUN pip install ghapi
 RUN pip install GitPython
 
