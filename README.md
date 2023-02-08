@@ -44,5 +44,3 @@ If the `values.yaml` upstream has changed, a patch between old upstream and new 
 The PR will have `values-orig.yaml` updated from upstream, and a commit will be made for this. If this happens your `values.yaml` and upstream will be compared and a unified diff added as a comment to the PR.
 
 It is safe to run this multiple times over the same PR, but `values.yaml` will not be updated more than once in a single PR.
-
-testtest
