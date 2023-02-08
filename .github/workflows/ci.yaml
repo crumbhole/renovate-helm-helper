@@ -10,6 +10,17 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3.3.0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+      - name: Install pylint
+        run: |
+          python -m pip install --upgrade pip
+          pip install pylint
+      - name: pylint
+        run: |
+          find . -name 'renovate_helper' -exec pylint {} \;
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v2
         with:
