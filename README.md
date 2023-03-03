@@ -35,6 +35,11 @@ Set the following environment variables:
 
 `https://github.com/<GH_OWNER>/<APP_REPO>` is the path to your repository.
 
+The container image is published as `ghcr.io/sendible-labs/renovate-helm-helper`. Tags available:
+- `x.x.x`: corresponds to that release. Be a good human and use this and renovate updates to it.
+- `latest`: is tip of `main` branch after a build has run. Good practice says don't use this.
+- `stable`: is last release. If you're using renovate, why use this, get renovate to renovate this properly.
+
 ## How does it help
 
 The `Chart.yaml`s affected by the PR will be compared to the target branch.
