@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Get git tag
         uses: olegtarasov/get-tag@2.1.3
       - name: Set up QEMU
