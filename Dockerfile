@@ -1,4 +1,4 @@
-FROM python:3.12.3
+FROM python:3.14.0
 RUN pip install ghapi
 RUN pip install GitPython
 
