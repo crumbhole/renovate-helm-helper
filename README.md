@@ -29,7 +29,7 @@ Set the following environment variables:
 | GIT_NAME      | yes      | Name to make commits as. Also used as the default `BOT_LOGIN` fallback (see below)                   |
 | APP_REPO      | yes      | Repository name in github                                                                            |
 | GIT_SHA       | yes      | The SHA1 to check                                                                                    |
-| TARGET_BRANCH | yes      | The branch that the PR is being merged into (todo: read this from GH)                                |
+| TARGET_BRANCH | no       | The branch the PR is being merged into. Derived from the PR via the GitHub API when unset; set explicitly only for local testing or unusual CI shapes |
 | CHECKOUT_PATH | yes      | Local path for where to checkout the code to from github to examine                                  |
 | PR_NUM        | yes      | Pull request number in github                                                                        |
 | BOT_LOGIN     | no       | Override the bot's own login used to filter existing PR comments. Only needed when `GITHUB_TOKEN` cannot access `GET /user` — most commonly under the default GitHub Actions token, where you want `BOT_LOGIN=github-actions[bot]`. Falls back to `GIT_NAME` when unset. |

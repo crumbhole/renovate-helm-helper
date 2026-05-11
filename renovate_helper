@@ -192,7 +192,6 @@ logging.basicConfig(level=logging.INFO)
 
 appRepo=os.environ['APP_REPO']
 gitSha=os.environ['GIT_SHA']
-targetBranch=os.environ['TARGET_BRANCH']
 checkoutPath=os.environ['CHECKOUT_PATH']
 prNum=os.environ['PR_NUM']
 token=os.environ['GITHUB_TOKEN']
@@ -205,6 +204,11 @@ assert not repo.bare
 api = GhApi(token=token,
             owner=GH_OWNER,
             repo=appRepo)
+
+# Target branch is derived from the PR via the GH API. TARGET_BRANCH is
+# still honoured as an override for local testing or odd CI shapes, but
+# is no longer required.
+targetBranch = (os.environ.get('TARGET_BRANCH') or '').strip() or api.pulls.get(prNum).base.ref
 try:
     bot_login = api.users.get_authenticated().login
 except HTTPError as e:
