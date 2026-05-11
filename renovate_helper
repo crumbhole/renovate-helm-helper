@@ -123,27 +123,45 @@ def try_commit_push():
         repo.create_remote('httpsorigin', f"https://{token}@github.com/{GH_OWNER}/{appRepo}")
         repo.remotes.httpsorigin.push().raise_if_error()
 
-def upsert_comment(header, body):
+def upsert_comment(header, body, delete_on_empty=False):
     '''
-    Find an existing PR comment whose body starts with `header` and update it
-    with the new body. If none exists, create a new comment. `header` is
-    prepended to the body — pass `body` without it. No-op if `body` is empty.
+    Find an existing PR comment authored by this token's user whose body
+    starts with `header`. If `body` is non-empty, update the comment to the
+    new body (or create one if no match was found). If `body` is empty and
+    `delete_on_empty` is True, delete the matching comment so a stale
+    message doesn't linger; otherwise no-op. `header` is prepended to `body`
+    — pass `body` without it.
+
+    The ownership check skips comments authored by other users. The GitHub
+    API rejects updates to comments owned by someone else with 403, so
+    matching by header prefix alone would crash the helper if a human ever
+    wrote a comment starting with one of our headers.
     '''
-    if body is None or len(body) == 0:
+    if body is None:
+        body = ""
+    empty = len(body) == 0
+    if empty and not delete_on_empty:
         return
     full_body = header+"\n"+body
     for page in paged(api.issues.list_comments, issue_number=prNum):
         for comment in page:
-            if comment.body.startswith(header):
-                if comment.body != full_body:
-                    api.issues.update_comment(comment_id=comment.id,
-                                              body=full_body)
+            if comment.user.login != bot_login:
+                continue
+            if not comment.body.startswith(header):
+                continue
+            if empty:
+                api.issues.delete_comment(comment_id=comment.id)
                 return
-    api.issues.create_comment(issue_number=prNum,
-                              body=full_body)
+            if comment.body != full_body:
+                api.issues.update_comment(comment_id=comment.id,
+                                          body=full_body)
+            return
+    if not empty:
+        api.issues.create_comment(issue_number=prNum,
+                                  body=full_body)
 
 def comment_values_update(new_comment):
-    upsert_comment(COMMENT_HEADER_VALUES, new_comment)
+    upsert_comment(COMMENT_HEADER_VALUES, new_comment, delete_on_empty=True)
 
 def comment_if_needed(new_comment):
     upsert_comment(COMMENT_HEADER, new_comment)
@@ -186,5 +204,6 @@ assert not repo.bare
 api = GhApi(token=token,
             owner=GH_OWNER,
             repo=appRepo)
+bot_login = api.users.get_authenticated().login
 
 main()
