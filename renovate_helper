@@ -204,6 +204,15 @@ assert not repo.bare
 api = GhApi(token=token,
             owner=GH_OWNER,
             repo=appRepo)
-bot_login = api.users.get_authenticated().login
+try:
+    bot_login = api.users.get_authenticated().login
+except Exception as e:
+    # GET /user is not accessible to the GitHub Actions GITHUB_TOKEN
+    # (returns 403 "Resource not accessible by integration"). Fall back
+    # to an explicit BOT_LOGIN env var, defaulting to GIT_NAME — which
+    # matches how this bot's comments are attributed when posted via
+    # the Actions token (e.g. "github-actions[bot]").
+    logging.warning("Could not fetch authenticated user (%s); using BOT_LOGIN/GIT_NAME fallback", e)
+    bot_login = os.environ.get('BOT_LOGIN', GIT_NAME)
 
 main()
