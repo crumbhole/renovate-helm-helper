@@ -8,7 +8,7 @@ import os
 import subprocess
 import logging
 
-from ghapi.all import GhApi
+from ghapi.all import GhApi, paged
 from git import Repo, Actor
 #from diff_match_patch import diff_match_patch
 import difflib as dl
@@ -123,33 +123,30 @@ def try_commit_push():
         repo.create_remote('httpsorigin', f"https://{token}@github.com/{GH_OWNER}/{appRepo}")
         repo.remotes.httpsorigin.push().raise_if_error()
 
+def upsert_comment(header, body):
+    '''
+    Find an existing PR comment whose body starts with `header` and update it
+    with the new body. If none exists, create a new comment. `header` is
+    prepended to the body — pass `body` without it. No-op if `body` is empty.
+    '''
+    if body is None or len(body) == 0:
+        return
+    full_body = header+"\n"+body
+    for page in paged(api.issues.list_comments, issue_number=prNum):
+        for comment in page:
+            if comment.body.startswith(header):
+                if comment.body != full_body:
+                    api.issues.update_comment(comment_id=comment.id,
+                                              body=full_body)
+                return
+    api.issues.create_comment(issue_number=prNum,
+                              body=full_body)
+
 def comment_values_update(new_comment):
-    if new_comment is not None and len(new_comment) >0 :
-        new_comment = COMMENT_HEADER_VALUES+"\n"+new_comment
-        api.issues.create_comment(issue_number=prNum,
-                                  body=new_comment)
+    upsert_comment(COMMENT_HEADER_VALUES, new_comment)
 
 def comment_if_needed(new_comment):
-    '''
-    If the new_comment doesn't exist as a GH comment, or is different from
-    the one starting with COMMENT_HEADER create or update it
-    '''
-    if new_comment is not None and len(new_comment) >0 :
-        new_comment = COMMENT_HEADER+"\n"+new_comment
-        existing_comments = api.issues.list_comments(issue_number=prNum)
-        found_comment = False
-        for comment in existing_comments:
-            print(comment.body)
-            if comment.body.startswith(COMMENT_HEADER):
-                found_comment = True
-                if comment != new_comment:
-                    api.issues.update_comment(comment_id=comment.id,
-                                              body=new_comment)
-                break
-
-        if found_comment is False:
-            api.issues.create_comment(issue_number=prNum,
-                                      body=new_comment)
+    upsert_comment(COMMENT_HEADER, new_comment)
 
 def process_diff():
     '''
