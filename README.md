@@ -21,19 +21,28 @@ dependencies:
 Run this python/container using your CI after any renovate.
 Set the following environment variables:
 
-| Name          | Content                                                               |
-|---------------|-----------------------------------------------------------------------|
-| GITHUB_TOKEN  | Token which can read and write to the repository and PRs              |
-| GH_OWNER      | The github organisation                                               |
-| GIT_EMAIL     | Email address to make commits as                                      |
-| GIT_NAME      | Name to make commits as                                               |
-| APP_REPO      | Repository name in github                                             |
-| GIT_SHA       | The SHA1 to check                                                     |
-| TARGET_BRANCH | The branch that the PR is being merged into (todo: read this from GH) |
-| CHECKOUT_PATH | Local path for where to checkout the code to from github to examine   |
-| PR_NUM        | Pull request number in github                                         |
+| Name          | Required | Content                                                                                              |
+|---------------|----------|------------------------------------------------------------------------------------------------------|
+| GITHUB_TOKEN  | yes      | Token which can read and write to the repository and PRs                                             |
+| GH_OWNER      | yes      | The github organisation                                                                              |
+| GIT_EMAIL     | yes      | Email address to make commits as                                                                     |
+| GIT_NAME      | yes      | Name to make commits as. Also used as the default `BOT_LOGIN` fallback (see below)                   |
+| APP_REPO      | yes      | Repository name in github                                                                            |
+| GIT_SHA       | yes      | The SHA1 to check                                                                                    |
+| TARGET_BRANCH | no       | The branch the PR is being merged into. Derived from the PR via the GitHub API when unset; set explicitly only for local testing or unusual CI shapes |
+| CHECKOUT_PATH | yes      | Local path for where to checkout the code to from github to examine                                  |
+| PR_NUM        | yes      | Pull request number in github                                                                        |
+| BOT_LOGIN     | no       | Override the bot's own login used to filter existing PR comments. Only needed when `GITHUB_TOKEN` cannot access `GET /user` — most commonly under the default GitHub Actions token, where you want `BOT_LOGIN=github-actions[bot]`. Falls back to `GIT_NAME` when unset. |
 
 `https://github.com/<GH_OWNER>/<APP_REPO>` is the path to your repository.
+
+### A note on `GITHUB_TOKEN` types
+
+The helper looks up its own identity via `GET /user` so it can ignore its own comments on PRs. That endpoint behaves differently depending on the token type:
+
+- **User PATs / fine-grained PATs** — `/user` works; no extra config needed.
+- **GitHub App installation tokens** — `/user` works and returns the app's bot user.
+- **The default `GITHUB_TOKEN` injected into GitHub Actions** — `/user` returns `403 Resource not accessible by integration`. Set `BOT_LOGIN=github-actions[bot]` (or whatever your workflow's `GIT_NAME` is) and the helper will use that instead of calling the API.
 
 The container image is published as `ghcr.io/crumbhole/renovate-helm-helper`. Tags available:
 - `x.x.x`: corresponds to that release. Be a good human and use this and renovate updates to it.

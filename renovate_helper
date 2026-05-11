@@ -7,6 +7,7 @@ Currently only deals with Chart.yamls
 import os
 import subprocess
 import logging
+from urllib.error import HTTPError
 
 from ghapi.all import GhApi, paged
 from git import Repo, Actor
@@ -191,7 +192,6 @@ logging.basicConfig(level=logging.INFO)
 
 appRepo=os.environ['APP_REPO']
 gitSha=os.environ['GIT_SHA']
-targetBranch=os.environ['TARGET_BRANCH']
 checkoutPath=os.environ['CHECKOUT_PATH']
 prNum=os.environ['PR_NUM']
 token=os.environ['GITHUB_TOKEN']
@@ -204,6 +204,26 @@ assert not repo.bare
 api = GhApi(token=token,
             owner=GH_OWNER,
             repo=appRepo)
-bot_login = api.users.get_authenticated().login
+
+# Target branch is derived from the PR via the GH API. TARGET_BRANCH is
+# still honoured as an override for local testing or odd CI shapes, but
+# is no longer required.
+targetBranch = (os.environ.get('TARGET_BRANCH') or '').strip() or api.pulls.get(prNum).base.ref
+try:
+    bot_login = api.users.get_authenticated().login
+except HTTPError as e:
+    # GET /user is not accessible to the GitHub Actions GITHUB_TOKEN —
+    # it responds 403 "Resource not accessible by integration". Other
+    # HTTP errors (network, auth misconfigured, rate-limit, etc.) are
+    # genuine failures and should still surface.
+    if e.code != 403:
+        raise
+    # Fall back to an explicit BOT_LOGIN env var, defaulting to GIT_NAME
+    # — which matches how this bot's comments are attributed when posted
+    # under the Actions token (e.g. "github-actions[bot]"). Treat an
+    # empty/whitespace-only BOT_LOGIN as unset so it can't poison the
+    # comment.user.login != bot_login check at the only call site.
+    logging.warning("GET /user returned 403; using BOT_LOGIN/GIT_NAME fallback")
+    bot_login = (os.environ.get('BOT_LOGIN') or '').strip() or GIT_NAME
 
 main()
