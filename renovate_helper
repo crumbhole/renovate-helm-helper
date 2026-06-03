@@ -59,7 +59,7 @@ def update_values_comment(chart_dir):
     rej_path = fs_path(f"{chart_dir}/values.yaml.rej")
     if os.path.exists(rej_path):
         rejects = read_file(rej_path)
-        comment="<details>\n<summary>I'm sorry, but I didn't patch values.yaml completely. Here are the patches which failed:</summary>\n\n```diff\n"
+        comment=f"<details>\n<summary>I'm sorry, but I didn't patch values.yaml in <code>{chart_dir}</code> completely. Here are the patches which failed:</summary>\n\n```diff\n"
         comment+=rejects
         comment+="```\n</details>\n"
         return comment
@@ -80,8 +80,15 @@ def update_values(chart_dir, merge_base):
         run_capture(f"patch -p0 {fs_path(values_path)} <{patch_path}", fs_chart_dir, check=False)
         os.unlink(patch_path)
         repo.index.add(fs_path(values_path))
-        return update_values_comment(chart_dir)
-    return ""
+        # Stage the .rej (when the patch didn't apply cleanly) so a failed
+        # auto-merge survives Renovate's re-runs. values.yaml is only ever
+        # patched once per PR, so without committing the .rej a later run
+        # would lose the failure signal. The committed .rej becomes the
+        # durable source of truth the commit-status check keys off; a human
+        # fixes values.yaml and deletes it to turn the check green.
+        rej_path = fs_path(f"{chart_dir}/values.yaml.rej")
+        if os.path.exists(rej_path):
+            repo.index.add(rej_path)
 
 def handle_chart(chart_path, merge_base):
     '''
@@ -89,7 +96,7 @@ def handle_chart(chart_path, merge_base):
     '''
     chart_dir = os.path.dirname(chart_path)
     update_orig_values(chart_dir)
-    comment_values_update(update_values(chart_dir, merge_base))
+    update_values(chart_dir, merge_base)
 
     fs_chart_dir = fs_path(os.path.dirname(chart_path))
     nowlines = run_capture('wc -l orig-values.yaml', fs_chart_dir)
@@ -167,6 +174,42 @@ def comment_values_update(new_comment):
 def comment_if_needed(new_comment):
     upsert_comment(COMMENT_HEADER, new_comment)
 
+def reject_comment(chart_dirs):
+    '''
+    Scan the affected chart dirs for a leftover/committed values.yaml.rej and
+    build the aggregated "manual merge needed" comment. Returns
+    (comment_body, any_failed). The .rej is the durable signal that the
+    upstream values.yaml could not be auto-merged, so this drives both the PR
+    comment and the commit-status check below regardless of which run first
+    produced it.
+    '''
+    comment = ""
+    failed = False
+    for chart_dir in chart_dirs:
+        chart_comment = update_values_comment(chart_dir)
+        if chart_comment:
+            failed = True
+            comment += chart_comment
+    return comment, failed
+
+def set_commit_status(state, description):
+    '''
+    Post a commit status on the current HEAD so branch protection can gate the
+    PR on it. No-op unless STATUS_CONTEXT is set (the feature is opt-in).
+
+    HEAD is used rather than GIT_SHA so the status lands on the commit the
+    helper may have just pushed (the real new PR head). The default GitHub
+    Actions GITHUB_TOKEN does not re-trigger CI on its own pushes, so a status
+    on the stale checked-out GIT_SHA would leave a required check hanging on
+    the pushed head and block every PR.
+    '''
+    if not status_context:
+        return
+    api.repos.create_commit_status(sha=repo.head.commit.hexsha,
+                                   state=state,
+                                   description=description,
+                                   context=status_context)
+
 def process_diff():
     '''
     Process the diff between where we are now and the target branch
@@ -174,56 +217,78 @@ def process_diff():
     merge_base = repo.merge_base(gitSha, "origin/"+targetBranch)
     diff = repo.head.commit.diff(merge_base)
     comments = ""
+    chart_dirs = []
     for diff_modified in diff.iter_change_type('M'):
         if os.path.basename(diff_modified.a_path) == 'Chart.yaml':
+            chart_dirs.append(os.path.dirname(diff_modified.a_path))
             comments += handle_chart(diff_modified.a_path, merge_base[0].hexsha)
-    return comments
+    return comments, chart_dirs
 
 def main():
     '''
     Main body
     '''
-    helper_comment=process_diff()
+    try:
+        helper_comment, chart_dirs = process_diff()
 
-    print(helper_comment)
-    try_commit_push()
-    comment_if_needed(helper_comment)
-logging.basicConfig(level=logging.INFO)
+        print(helper_comment)
+        try_commit_push()
+        comment_if_needed(helper_comment)
 
-appRepo=os.environ['APP_REPO']
-gitSha=os.environ['GIT_SHA']
-checkoutPath=os.environ['CHECKOUT_PATH']
-prNum=os.environ['PR_NUM']
-token=os.environ['GITHUB_TOKEN']
-GH_OWNER=os.environ['GH_OWNER']
-GIT_EMAIL=os.environ['GIT_EMAIL']
-GIT_NAME=os.environ['GIT_NAME']
-
-repo = Repo(checkoutPath)
-assert not repo.bare
-api = GhApi(token=token,
-            owner=GH_OWNER,
-            repo=appRepo)
-
-# Target branch is derived from the PR via the GH API. TARGET_BRANCH is
-# still honoured as an override for local testing or odd CI shapes, but
-# is no longer required.
-targetBranch = (os.environ.get('TARGET_BRANCH') or '').strip() or api.pulls.get(prNum).base.ref
-try:
-    bot_login = api.users.get_authenticated().login
-except HTTPError as e:
-    # GET /user is not accessible to the GitHub Actions GITHUB_TOKEN —
-    # it responds 403 "Resource not accessible by integration". Other
-    # HTTP errors (network, auth misconfigured, rate-limit, etc.) are
-    # genuine failures and should still surface.
-    if e.code != 403:
+        rejects, failed = reject_comment(chart_dirs)
+        comment_values_update(rejects)
+        if failed:
+            set_commit_status('failure',
+                              'values.yaml needs a manual merge - see the PR comment')
+        else:
+            set_commit_status('success', 'values.yaml is up to date with upstream')
+    except Exception:
+        set_commit_status('error', 'renovate-helm-helper failed - see CI logs')
         raise
-    # Fall back to an explicit BOT_LOGIN env var, defaulting to GIT_NAME
-    # — which matches how this bot's comments are attributed when posted
-    # under the Actions token (e.g. "github-actions[bot]"). Treat an
-    # empty/whitespace-only BOT_LOGIN as unset so it can't poison the
-    # comment.user.login != bot_login check at the only call site.
-    logging.warning("GET /user returned 403; using BOT_LOGIN/GIT_NAME fallback")
-    bot_login = (os.environ.get('BOT_LOGIN') or '').strip() or GIT_NAME
+# Bootstrap is guarded so the module can be imported (e.g. by tests) without
+# requiring the full env / a real checkout / GitHub access. The assignments
+# stay at module scope (an `if` block does not create one), so the functions
+# above keep resolving them as globals at runtime.
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
 
-main()
+    appRepo=os.environ['APP_REPO']
+    gitSha=os.environ['GIT_SHA']
+    checkoutPath=os.environ['CHECKOUT_PATH']
+    prNum=os.environ['PR_NUM']
+    token=os.environ['GITHUB_TOKEN']
+    GH_OWNER=os.environ['GH_OWNER']
+    GIT_EMAIL=os.environ['GIT_EMAIL']
+    GIT_NAME=os.environ['GIT_NAME']
+    # Optional: enables the PR commit-status check and names its context (the
+    # string referenced in branch protection's required checks). Unset = off.
+    status_context = (os.environ.get('STATUS_CONTEXT') or '').strip()
+
+    repo = Repo(checkoutPath)
+    assert not repo.bare
+    api = GhApi(token=token,
+                owner=GH_OWNER,
+                repo=appRepo)
+
+    # Target branch is derived from the PR via the GH API. TARGET_BRANCH is
+    # still honoured as an override for local testing or odd CI shapes, but
+    # is no longer required.
+    targetBranch = (os.environ.get('TARGET_BRANCH') or '').strip() or api.pulls.get(prNum).base.ref
+    try:
+        bot_login = api.users.get_authenticated().login
+    except HTTPError as e:
+        # GET /user is not accessible to the GitHub Actions GITHUB_TOKEN —
+        # it responds 403 "Resource not accessible by integration". Other
+        # HTTP errors (network, auth misconfigured, rate-limit, etc.) are
+        # genuine failures and should still surface.
+        if e.code != 403:
+            raise
+        # Fall back to an explicit BOT_LOGIN env var, defaulting to GIT_NAME
+        # — which matches how this bot's comments are attributed when posted
+        # under the Actions token (e.g. "github-actions[bot]"). Treat an
+        # empty/whitespace-only BOT_LOGIN as unset so it can't poison the
+        # comment.user.login != bot_login check at the only call site.
+        logging.warning("GET /user returned 403; using BOT_LOGIN/GIT_NAME fallback")
+        bot_login = (os.environ.get('BOT_LOGIN') or '').strip() or GIT_NAME
+
+    main()

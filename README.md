@@ -33,6 +33,7 @@ Set the following environment variables:
 | CHECKOUT_PATH | yes      | Local path for where to checkout the code to from github to examine                                  |
 | PR_NUM        | yes      | Pull request number in github                                                                        |
 | BOT_LOGIN     | no       | Override the bot's own login used to filter existing PR comments. Only needed when `GITHUB_TOKEN` cannot access `GET /user` — most commonly under the default GitHub Actions token, where you want `BOT_LOGIN=github-actions[bot]`. Falls back to `GIT_NAME` when unset. |
+| STATUS_CONTEXT | no      | Opt in to posting a commit-status check on the PR. Unset or empty means off (default). When set, the value is both the on-switch and the name of the status — use that same string as the required status check in your branch protection rule to block merges. See [PR status check](#pr-status-check). Needs `statuses: write` (see below). |
 
 `https://github.com/<GH_OWNER>/<APP_REPO>` is the path to your repository.
 
@@ -58,3 +59,37 @@ If the `values.yaml` upstream has changed, a patch between old upstream and new 
 The PR will have `values-orig.yaml` updated from upstream, and a commit will be made for this. If this happens your `values.yaml` and upstream will be compared and a unified diff added as a comment to the PR.
 
 It is safe to run this multiple times over the same PR, but `values.yaml` will not be updated more than once in a single PR.
+
+## PR status check
+
+Out of the box the helper just comments on the PR, so it's on you to spot when an upstream `values.yaml` wouldn't merge cleanly. If you'd rather have a check that can block the merge, set `STATUS_CONTEXT`.
+
+`STATUS_CONTEXT` does two jobs: setting it switches the feature on, and whatever you set it to becomes the name of the status that gets posted. Leave it unset and nothing changes from before.
+
+The status goes on via the GitHub Commit Status API (`POST /repos/{owner}/{repo}/statuses/{sha}`), not the Checks API. It's attached to the helper's resulting HEAD commit, the one it just pushed, rather than the `GIT_SHA` you fed in. That matters because the default GitHub Actions `GITHUB_TOKEN` won't re-trigger CI on its own pushes, so if the status landed on the old SHA a required check would just sit there waiting on the new head forever.
+
+What you'll get:
+
+- `success`: every affected chart's `values.yaml` merged cleanly, or upstream's `values.yaml` didn't change. No `.rej` files lying around.
+- `failure`: at least one chart has a `values.yaml.rej`, so the upstream patch wouldn't apply on its own and you'll need to merge it by hand. The helper commits the `.rej` so the failure sticks around. Renovate re-runs the same PR a lot, but the auto-merge only ever runs once per PR, so if the `.rej` weren't committed the check would flip green on the next run with nothing actually fixed. To clear it, fix `values.yaml`, delete the `.rej`, and the next run goes green.
+- `error`: the helper itself fell over. It posts an `error` status and exits non-zero so you can see what happened in the CI logs.
+
+Setting `STATUS_CONTEXT` only posts the status, it won't stop anything on its own. To actually block a bad PR, add a branch protection rule on your target branch with a required status check named the same as your `STATUS_CONTEXT`. With that in place a committed `.rej` keeps the PR from merging, so it never lands on the target branch.
+
+### Extra permission for the status check
+
+The Commit Status API needs `statuses: write`, which is separate from the `contents` and `pull-requests` permissions the helper already uses to push commits and comment.
+
+For the default GitHub Actions `GITHUB_TOKEN`, add it to your workflow's `permissions:` block:
+
+```YAML
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+```
+
+For other token types:
+
+- Classic PAT: the `repo` scope already covers commit statuses.
+- Fine-grained PAT or GitHub App: give it the "Commit statuses" permission, set to read and write.
