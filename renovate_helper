@@ -79,16 +79,21 @@ def update_values(chart_dir, merge_base):
         write_file(patch_path, orig_diff.stdout.decode('utf-8'))
         run_capture(f"patch -p0 {fs_path(values_path)} <{patch_path}", fs_chart_dir, check=False)
         os.unlink(patch_path)
-        repo.index.add(fs_path(values_path))
-        # Stage the .rej (when the patch didn't apply cleanly) so a failed
-        # auto-merge survives Renovate's re-runs. values.yaml is only ever
-        # patched once per PR, so without committing the .rej a later run
-        # would lose the failure signal. The committed .rej becomes the
-        # durable source of truth the commit-status check keys off; a human
-        # fixes values.yaml and deletes it to turn the check green.
+        # A .rej means the patch did not apply cleanly. Never commit a partial
+        # merge: discard the half-patched values.yaml so the working tree stays
+        # identical to the merge base, and never stage the .rej. That keeps the
+        # commit clean AND makes the failure signal self-healing — because
+        # values.yaml is left untouched, every later run re-derives the same
+        # empty values_diff, re-runs the patch, and regenerates the .rej on disk
+        # for reject_comment / the commit-status check. A human resolves it by
+        # editing values.yaml themselves; the helper then backs off (non-empty
+        # values_diff) and the check goes green. The .rej is left on disk for
+        # this run's comment/status scan but is never added to the index.
         rej_path = fs_path(f"{chart_dir}/values.yaml.rej")
         if os.path.exists(rej_path):
-            repo.index.add(rej_path)
+            run_capture(f"git checkout -- {values_path}", checkoutPath)
+        else:
+            repo.index.add(fs_path(values_path))
 
 def handle_chart(chart_path, merge_base):
     '''
@@ -176,12 +181,11 @@ def comment_if_needed(new_comment):
 
 def reject_comment(chart_dirs):
     '''
-    Scan the affected chart dirs for a leftover/committed values.yaml.rej and
-    build the aggregated "manual merge needed" comment. Returns
-    (comment_body, any_failed). The .rej is the durable signal that the
-    upstream values.yaml could not be auto-merged, so this drives both the PR
-    comment and the commit-status check below regardless of which run first
-    produced it.
+    Scan the affected chart dirs for a leftover values.yaml.rej and build the
+    aggregated "manual merge needed" comment. Returns (comment_body,
+    any_failed). The .rej is regenerated on disk by update_values every run the
+    auto-merge fails (it is never committed), so this drives both the PR comment
+    and the commit-status check below from the current run's outcome.
     '''
     comment = ""
     failed = False

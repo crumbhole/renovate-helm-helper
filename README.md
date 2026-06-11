@@ -71,10 +71,10 @@ The status goes on via the GitHub Commit Status API (`POST /repos/{owner}/{repo}
 What you'll get:
 
 - `success`: every affected chart's `values.yaml` merged cleanly, or upstream's `values.yaml` didn't change. No `.rej` files lying around.
-- `failure`: at least one chart has a `values.yaml.rej`, so the upstream patch wouldn't apply on its own and you'll need to merge it by hand. The helper commits the `.rej` so the failure sticks around. Renovate re-runs the same PR a lot, but the auto-merge only ever runs once per PR, so if the `.rej` weren't committed the check would flip green on the next run with nothing actually fixed. To clear it, fix `values.yaml`, delete the `.rej`, and the next run goes green.
+- `failure`: at least one chart has a `values.yaml.rej`, so the upstream patch wouldn't apply on its own and you'll need to merge it by hand. The `.rej` never gets committed, the commit stays clean. When the patch fails the helper throws away the half-patched `values.yaml` and leaves it at the merge base, so every later run patches again and writes the `.rej` back out on disk. Nothing has to live in git for the check to stay red. To clear it, edit `values.yaml` yourself. Once it differs from the merge base the helper backs off, no `.rej` gets written, and the next run goes green.
 - `error`: the helper itself fell over. It posts an `error` status and exits non-zero so you can see what happened in the CI logs.
 
-Setting `STATUS_CONTEXT` only posts the status, it won't stop anything on its own. To actually block a bad PR, add a branch protection rule on your target branch with a required status check named the same as your `STATUS_CONTEXT`. With that in place a committed `.rej` keeps the PR from merging, so it never lands on the target branch.
+Setting `STATUS_CONTEXT` only posts the status, it won't stop anything on its own. To actually block a bad PR, add a branch protection rule on your target branch with a required status check named the same as your `STATUS_CONTEXT`. With that in place a `failure` status keeps the PR from merging, so it never lands on the target branch until you've sorted out `values.yaml` by hand.
 
 ### Extra permission for the status check
 
