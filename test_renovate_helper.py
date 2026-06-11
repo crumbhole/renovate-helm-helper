@@ -118,15 +118,18 @@ class RejectCommentTests(unittest.TestCase):
         self.assertIn("bad", comment)
 
 
-class UpdateValuesStagesRejTests(unittest.TestCase):
-    '''The durability guarantee: a failed patch's .rej is staged for commit.'''
+class UpdateValuesFailedPatchTests(unittest.TestCase):
+    '''The clean-commit guarantee: a failed patch commits nothing — the .rej is
+    never staged and the half-patched values.yaml is discarded so the working
+    tree stays at the merge base. The .rej is left on disk only so this run's
+    comment / commit-status scan can see it; the next run regenerates it.'''
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.repo = init_repo(self.tmp)
         rhh.repo = self.repo
         rhh.checkoutPath = self.tmp
 
-    def test_failed_patch_stages_rej(self):
+    def test_failed_patch_commits_nothing_but_leaves_rej_on_disk(self):
         chart = "mychart"
         d = os.path.join(self.tmp, chart)
         os.makedirs(d)
@@ -150,8 +153,20 @@ class UpdateValuesStagesRejTests(unittest.TestCase):
         rhh.update_values(chart, merge_base)
 
         staged = {k[0] for k in self.repo.index.entries.keys()}
-        self.assertIn(f"{chart}/values.yaml.rej", staged,
-                      "the .rej must be staged so the failure survives re-runs")
+        self.assertNotIn(f"{chart}/values.yaml.rej", staged,
+                         "the .rej must never reach the index")
+        # Nothing the helper did here may be committable: the index must still
+        # match the merge base (update_orig_values stages orig-values.yaml
+        # separately; update_values itself must stage nothing on a failed patch).
+        self.assertEqual([], self.repo.index.diff(merge_base),
+                         "a failed patch must leave a clean index")
+        # The partial patch is discarded — working tree back at the merge base.
+        with open(os.path.join(d, "values.yaml")) as f:
+            self.assertEqual(values, f.read())
+        # But the .rej is still on disk for this run's comment/status scan.
+        self.assertTrue(
+            os.path.exists(os.path.join(d, "values.yaml.rej")),
+            "the .rej must remain on disk so reject_comment can see it")
 
     def test_clean_patch_leaves_no_rej(self):
         chart = "mychart"
