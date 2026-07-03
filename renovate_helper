@@ -18,6 +18,12 @@ import difflib as dl
 COMMENT_HEADER='Renovate-helper bot would like to help'
 COMMENT_HEADER_VALUES='Renovate-helper bot has mangled values.yaml for you'
 
+# GitHub rejects issue/PR comment bodies longer than 65536 characters with an
+# HTTP 422. The help comment embeds the full upstream values diff, which blows
+# past that limit for large charts (e.g. loki), so cap the body and flag the
+# truncation rather than crashing the whole run.
+MAX_COMMENT_CHARS=65536
+
 def read_file(path):
     with open(path,"r",encoding="utf8") as f:
         contents = f.read()
@@ -46,6 +52,17 @@ def update_orig_values(chart_dir):
     run_capture('cat charts/*/values.yaml | sed -r -e \'s/^(.*)/  \\1/g\' | sed -r -e \'s/^  $//g\' > orig-values.yaml', fs_chart_dir)
     repo.index.add(fs_chart_dir+'/orig-values.yaml')
 
+def file_exists_at_sha(file_path, sha):
+    '''
+    True if file_path was tracked at commit `sha`. A chart dir that only gained
+    its orig-values.yaml on this PR branch has none at the merge base; guarding
+    on this stops `git show <merge_base>:orig-values.yaml` — which exits 128 for
+    a path that never existed there — from crashing the whole run.
+    '''
+    result = run_capture(f"git cat-file -e {sha}:{file_path}", checkoutPath,
+                         check=False)
+    return result.returncode == 0
+
 def diff_with_sha(file_path, sha):
     sha_file_path = f"{fs_path(file_path)}.other"
 
@@ -72,8 +89,18 @@ def update_values(chart_dir, merge_base):
     logging.info(values_diff.stdout.decode('utf-8'))
     # If values hasn't yet been mangled
     if len(values_diff.stdout.decode('utf-8')) == 0:
+        orig_path = f"{chart_dir}/orig-values.yaml"
+        # First run for a chart: orig-values.yaml exists in the working tree
+        # (update_orig_values just generated it) but not at the merge base, so
+        # there is no old-vs-new orig diff to derive a patch from. Skip the
+        # auto-merge instead of letting `git show <merge_base>:orig-values.yaml`
+        # blow up the run.
+        if not file_exists_at_sha(orig_path, merge_base):
+            logging.info(f"No orig-values.yaml at the merge base for "
+                         f"{chart_dir}; skipping auto-merge")
+            return
         logging.info(f"Attempting to update {values_path}")
-        orig_diff = diff_with_sha(f"{chart_dir}/orig-values.yaml", merge_base)
+        orig_diff = diff_with_sha(orig_path, merge_base)
         logging.info(orig_diff.stdout.decode('utf-8'))
         patch_path = f"{fs_chart_dir}/patch"
         write_file(patch_path, orig_diff.stdout.decode('utf-8'))
@@ -136,6 +163,20 @@ def try_commit_push():
         repo.create_remote('httpsorigin', f"https://{token}@github.com/{GH_OWNER}/{appRepo}")
         repo.remotes.httpsorigin.push().raise_if_error()
 
+def truncate_comment(body):
+    '''
+    Cap a comment body at GitHub's 65536-character limit. The help comment
+    embeds a full values diff inside a ```diff fenced ```<details> block, so a
+    naive cut would leave those unclosed; append a notice that re-closes both
+    and points at the CI logs for the untruncated diff.
+    '''
+    if len(body) <= MAX_COMMENT_CHARS:
+        return body
+    notice = ("\n```\n</details>\n\n"
+              "**Comment truncated — the upstream values diff was too large to "
+              "post in full. See the CI logs for the complete diff.**\n")
+    return body[:MAX_COMMENT_CHARS - len(notice)] + notice
+
 def upsert_comment(header, body, delete_on_empty=False):
     '''
     Find an existing PR comment authored by this token's user whose body
@@ -155,7 +196,7 @@ def upsert_comment(header, body, delete_on_empty=False):
     empty = len(body) == 0
     if empty and not delete_on_empty:
         return
-    full_body = header+"\n"+body
+    full_body = truncate_comment(header+"\n"+body)
     for page in paged(api.issues.list_comments, issue_number=prNum):
         for comment in page:
             if comment.user.login != bot_login:

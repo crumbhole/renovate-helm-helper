@@ -192,6 +192,50 @@ class UpdateValuesFailedPatchTests(unittest.TestCase):
             os.path.exists(os.path.join(d, "values.yaml.rej")))
 
 
+class UpdateValuesNewChartTests(unittest.TestCase):
+    '''A chart whose orig-values.yaml is new on this branch (absent at the
+    merge base) must not crash the run: git show <merge_base>:orig-values.yaml
+    exits 128 for a path that never existed there.'''
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.repo = init_repo(self.tmp)
+        rhh.repo = self.repo
+        rhh.checkoutPath = self.tmp
+
+    def test_missing_orig_values_at_merge_base_is_skipped(self):
+        chart = "newchart"
+        d = os.path.join(self.tmp, chart)
+        os.makedirs(d)
+        # Only values.yaml existed at the merge base.
+        with open(os.path.join(d, "values.yaml"), "w") as f:
+            f.write("key: value\n")
+        self.repo.index.add([f"{chart}/values.yaml"])
+        merge_base = self.repo.index.commit("base").hexsha
+        # orig-values.yaml appears only now (as update_orig_values would leave
+        # it), untracked at the merge base.
+        with open(os.path.join(d, "orig-values.yaml"), "w") as f:
+            f.write("  key: value\n")
+
+        # Must not raise, and must not leave a .rej behind.
+        rhh.update_values(chart, merge_base)
+
+        self.assertFalse(
+            os.path.exists(os.path.join(d, "values.yaml.rej")))
+
+
+class TruncateCommentTests(unittest.TestCase):
+    def test_short_body_unchanged(self):
+        body = "a small comment"
+        self.assertEqual(rhh.truncate_comment(body), body)
+
+    def test_long_body_capped_with_notice(self):
+        body = "x" * (rhh.MAX_COMMENT_CHARS + 5000)
+        out = rhh.truncate_comment(body)
+        self.assertLessEqual(len(out), rhh.MAX_COMMENT_CHARS)
+        self.assertIn("truncated", out.lower())
+        self.assertTrue(out.endswith("\n"))
+
+
 class MainFlowTests(unittest.TestCase):
     '''main() maps merge outcome to the right commit-status state.'''
     def setUp(self):
