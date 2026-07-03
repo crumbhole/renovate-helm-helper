@@ -165,17 +165,31 @@ def try_commit_push():
 
 def truncate_comment(body):
     '''
-    Cap a comment body at GitHub's 65536-character limit. The help comment
-    embeds a full values diff inside a ```diff fenced ```<details> block, so a
-    naive cut would leave those unclosed; append a notice that re-closes both
-    and points at the CI logs for the untruncated diff.
+    Cap a comment body at GitHub's 65536-character limit. The body is a run of
+    per-chart blocks, each wrapping its values diff in its own ```diff fence
+    inside a <details> block, so the cut can land anywhere — inside a fence,
+    inside a <details> but past its fence, or cleanly between two closed
+    blocks. Close only what the truncated prefix actually left open (an odd
+    number of ``` fences, an unmatched <details>) so the markdown stays valid
+    instead of injecting a stray fence, then append the CI-log notice.
     '''
     if len(body) <= MAX_COMMENT_CHARS:
         return body
-    notice = ("\n```\n</details>\n\n"
-              "**Comment truncated — the upstream values diff was too large to "
-              "post in full. See the CI logs for the complete diff.**\n")
-    return body[:MAX_COMMENT_CHARS - len(notice)] + notice
+    notice = ("\n\n**Comment truncated — the upstream values diff was too "
+              "large to post in full. See the CI logs for the complete "
+              "diff.**\n")
+    # Reserve room for the notice and the longest closer we might add up front,
+    # so the returned body never exceeds the limit whatever the cut leaves open.
+    closer_max = len("\n```\n</details>\n")
+    truncated = body[:MAX_COMMENT_CHARS - len(notice) - closer_max]
+    closer = ""
+    if truncated.count("```") % 2 == 1:
+        closer += "\n```"
+    if truncated.count("<details>") > truncated.count("</details>"):
+        closer += "\n</details>"
+    if closer:
+        closer += "\n"
+    return truncated + closer + notice
 
 def upsert_comment(header, body, delete_on_empty=False):
     '''

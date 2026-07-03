@@ -235,6 +235,29 @@ class TruncateCommentTests(unittest.TestCase):
         self.assertIn("truncated", out.lower())
         self.assertTrue(out.endswith("\n"))
 
+    def test_no_stray_fence_when_nothing_open(self):
+        # Cut lands in plain text with no open fence/details -> nothing may be
+        # injected, or the notice renders as literal code. (This is the bug the
+        # old unconditional closer caused.)
+        body = "plain text no fences here. " * 5000
+        self.assertGreater(len(body), rhh.MAX_COMMENT_CHARS)
+        out = rhh.truncate_comment(body)
+        self.assertLessEqual(len(out), rhh.MAX_COMMENT_CHARS)
+        self.assertEqual(out.count("```"), 0)
+        self.assertEqual(out.count("</details>"), 0)
+        self.assertIn("truncated", out.lower())
+
+    def test_open_fence_and_details_are_closed(self):
+        # Cut lands deep inside an open ```diff fence within a <details> -> both
+        # must be closed so the trailing notice is real markdown.
+        body = "<details>\n<summary>x</summary>\n\n```diff\n" + "+ line\n" * 20000
+        self.assertGreater(len(body), rhh.MAX_COMMENT_CHARS)
+        out = rhh.truncate_comment(body)
+        self.assertLessEqual(len(out), rhh.MAX_COMMENT_CHARS)
+        self.assertEqual(out.count("```") % 2, 0)
+        self.assertEqual(out.count("<details>"), out.count("</details>"))
+        self.assertIn("truncated", out.lower())
+
 
 class MainFlowTests(unittest.TestCase):
     '''main() maps merge outcome to the right commit-status state.'''
