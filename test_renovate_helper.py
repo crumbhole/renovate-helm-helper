@@ -4,8 +4,8 @@ Tests for the renovate_helper PR status-check feature.
 The script has no .py extension and runs its bootstrap under an
 `if __name__ == '__main__'` guard, so we load it by path with importlib and
 exercise the functions directly, injecting module globals (repo/api/...) as
-needed. Run inside the published image which has ghapi, GitPython, git and
-patch available:
+needed. Run inside the published image which has ghapi, GitPython and git
+available:
 
     docker run --rm -v "$PWD":/work -w /work renovate-helper \
         python3 test_renovate_helper.py
@@ -118,18 +118,18 @@ class RejectCommentTests(unittest.TestCase):
         self.assertIn("bad", comment)
 
 
-class UpdateValuesFailedPatchTests(unittest.TestCase):
-    '''The clean-commit guarantee: a failed patch commits nothing — the .rej is
-    never staged and the half-patched values.yaml is discarded so the working
-    tree stays at the merge base. The .rej is left on disk only so this run's
-    comment / commit-status scan can see it; the next run regenerates it.'''
+class UpdateValuesConflictTests(unittest.TestCase):
+    '''The clean-commit guarantee: a conflicted merge commits nothing — the
+    .rej is never staged and values.yaml is left at the merge base. The .rej is
+    on disk only so this run's comment / commit-status scan can see it; the
+    next run regenerates it.'''
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.repo = init_repo(self.tmp)
         rhh.repo = self.repo
         rhh.checkoutPath = self.tmp
 
-    def test_failed_patch_commits_nothing_but_leaves_rej_on_disk(self):
+    def test_conflict_commits_nothing_but_leaves_rej_on_disk(self):
         chart = "mychart"
         d = os.path.join(self.tmp, chart)
         os.makedirs(d)
@@ -144,9 +144,9 @@ class UpdateValuesFailedPatchTests(unittest.TestCase):
                              f"{chart}/orig-values.yaml"])
         merge_base = self.repo.index.commit("base").hexsha
 
-        # Upstream orig-values changes the line whose context is missing from
-        # the customised values.yaml -> patch rejects. values.yaml left as the
-        # merge-base version so update_values takes the patch branch.
+        # Upstream rewrites the same line the wrapper overrode -> a real
+        # conflict. values.yaml left as the merge-base version so update_values
+        # takes the merge branch.
         with open(os.path.join(d, "orig-values.yaml"), "w") as f:
             f.write("key: changed\ncommon: line\n")
 
@@ -157,10 +157,10 @@ class UpdateValuesFailedPatchTests(unittest.TestCase):
                          "the .rej must never reach the index")
         # Nothing the helper did here may be committable: the index must still
         # match the merge base (update_orig_values stages orig-values.yaml
-        # separately; update_values itself must stage nothing on a failed patch).
+        # separately; update_values itself must stage nothing on a conflict).
         self.assertEqual([], self.repo.index.diff(merge_base),
-                         "a failed patch must leave a clean index")
-        # The partial patch is discarded — working tree back at the merge base.
+                         "a conflict must leave a clean index")
+        # The conflicted merge is discarded — working tree back at the merge base.
         with open(os.path.join(d, "values.yaml")) as f:
             self.assertEqual(values, f.read())
         # But the .rej is still on disk for this run's comment/status scan.
@@ -168,11 +168,11 @@ class UpdateValuesFailedPatchTests(unittest.TestCase):
             os.path.exists(os.path.join(d, "values.yaml.rej")),
             "the .rej must remain on disk so reject_comment can see it")
 
-    def test_clean_patch_leaves_no_rej(self):
+    def test_clean_merge_leaves_no_rej(self):
         chart = "mychart"
         d = os.path.join(self.tmp, chart)
         os.makedirs(d)
-        # values.yaml mirrors upstream, so the upstream hunk applies cleanly.
+        # values.yaml mirrors upstream, so the upstream change lands cleanly.
         base = "key: original\ncommon: line\n"
         for name in ("values.yaml", "orig-values.yaml"):
             with open(os.path.join(d, name), "w") as f:
@@ -190,6 +190,75 @@ class UpdateValuesFailedPatchTests(unittest.TestCase):
         self.assertNotIn(f"{chart}/values.yaml.rej", staged)
         self.assertFalse(
             os.path.exists(os.path.join(d, "values.yaml.rej")))
+        with open(os.path.join(d, "values.yaml")) as f:
+            self.assertEqual("key: changed\ncommon: line\n", f.read(),
+                             "a clean merge must reach values.yaml")
+
+
+class UpdateValuesPinnedValueTests(unittest.TestCase):
+    '''The regression this release exists for. A wrapper that pinned a value
+    the new chart's default also moves to used to lose the whole bump: `patch`
+    read the first hunk as already applied and skipped the file, taking every
+    other hunk with it. Silently, on a two-hunk diff.
+
+    The pin gets there on its own — a Renovate docker-tag rule bumps image.tag
+    inside values.yaml while the helm rule bumps Chart.yaml, so merging the
+    docker half first leaves values.yaml ahead of the baseline.'''
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.repo = init_repo(self.tmp)
+        rhh.repo = self.repo
+        rhh.checkoutPath = self.tmp
+
+    def test_pinned_value_does_not_drop_the_rest_of_the_bump(self):
+        chart = "datadog"
+        d = os.path.join(self.tmp, chart)
+        os.makedirs(d)
+        # Far enough apart that the tag and the new block are separate hunks.
+        filler = "".join(f"  filler{i}: v{i}\n" for i in range(20))
+        orig_old = f"  image:\n    tag: 1.28.0\n{filler}  remote:\n    enabled: false\n"
+        orig_new = (f"  image:\n    tag: 1.29.0\n{filler}  remote:\n"
+                    "    enabled: false\n  untaintController:\n    enabled: false\n")
+        values = ("# wrapper\ndatadog-operator:\n"
+                  + orig_old.replace("tag: 1.28.0", "tag: 1.29.0"))
+        with open(os.path.join(d, "values.yaml"), "w") as f:
+            f.write(values)
+        with open(os.path.join(d, "orig-values.yaml"), "w") as f:
+            f.write(orig_old)
+        self.repo.index.add([f"{chart}/values.yaml", f"{chart}/orig-values.yaml"])
+        merge_base = self.repo.index.commit("base").hexsha
+
+        with open(os.path.join(d, "orig-values.yaml"), "w") as f:
+            f.write(orig_new)
+
+        rhh.update_values(chart, merge_base)
+
+        with open(os.path.join(d, "values.yaml")) as f:
+            merged = f.read()
+        self.assertIn("untaintController", merged,
+                      "the new upstream key must reach values.yaml")
+        self.assertIn("tag: 1.29.0", merged, "the pin must survive")
+        self.assertNotIn("tag: 1.28.0", merged, "and must not be walked back")
+        self.assertFalse(os.path.exists(os.path.join(d, "values.yaml.rej")),
+                         "a value both sides moved to is not a conflict")
+
+
+class ConflictRegionsTests(unittest.TestCase):
+    def test_only_the_conflicted_stretch_is_kept(self):
+        merged = ("".join(f"line{i}\n" for i in range(50))
+                  + "<<<<<<< ours\nmine\n||||||| base\nwas\n=======\ntheirs\n>>>>>>> theirs\n"
+                  + "".join(f"tail{i}\n" for i in range(50)))
+        out = rhh.conflict_regions(merged)
+        self.assertIn("<<<<<<< ours", out)
+        self.assertIn("||||||| base", out, "diff3 keeps the base side")
+        self.assertIn("line49\n", out)
+        self.assertIn("tail2\n", out)
+        self.assertNotIn("line0\n", out, "unconflicted body must be dropped")
+        self.assertNotIn("tail49\n", out)
+        self.assertIn("@@ values.yaml line 51 @@", out, "conflicts are located")
+
+    def test_clean_merge_yields_nothing(self):
+        self.assertEqual("", rhh.conflict_regions("a\nb\nc\n"))
 
 
 class UpdateValuesNewChartTests(unittest.TestCase):
@@ -281,11 +350,14 @@ class MainFlowTests(unittest.TestCase):
         rhh.main()
         self.assertEqual(self.status, ["success"])
 
-    def test_rejects_report_failure(self):
+    def test_rejects_report_failure_and_exit_non_zero(self):
         rhh.process_diff = lambda: ("body", ["chart"])
         rhh.reject_comment = lambda dirs: ("rej comment", True)
-        rhh.main()
+        with self.assertRaises(SystemExit) as caught:
+            rhh.main()
         self.assertEqual(self.status, ["failure"])
+        self.assertNotEqual(0, caught.exception.code,
+                            "a conflict must fail the job, STATUS_CONTEXT or not")
 
     def test_crash_reports_error_and_reraises(self):
         def boom():

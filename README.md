@@ -54,7 +54,9 @@ The container image is published as `ghcr.io/crumbhole/renovate-helm-helper`. Ta
 
 The `Chart.yaml`s affected by the PR will be compared to the target branch.
 
-If the `values.yaml` upstream has changed, a patch between old upstream and new will be generated and applied to your `values.yaml` attempting to keep it up to date with upstream. If this fails, which is quite likely if it's patching near where you have modified `values.yaml`, it will add the failed diffs as a comment to the PR to help you to manually patch.
+If the upstream `values.yaml` has changed, the helper three-way merges it into yours: your `values.yaml` on one side, the new upstream one on the other, and the `orig-values.yaml` you had before as the common ancestor. Upstream changes to lines you never touched land on their own. Where you and upstream have both edited the same lines it gives up, leaves your `values.yaml` exactly as it was, and comments with the conflicting stretches so you can merge those by hand.
+
+If you pinned a value ahead of the chart and upstream has now caught up, that's not a conflict. Both sides made the same edit, so the merge takes it and gets on with the rest of the bump.
 
 The PR will have `values-orig.yaml` updated from upstream, and a commit will be made for this. If this happens your `values.yaml` and upstream will be compared and a unified diff added as a comment to the PR.
 
@@ -62,7 +64,7 @@ It is safe to run this multiple times over the same PR, but `values.yaml` will n
 
 ## PR status check
 
-Out of the box the helper just comments on the PR, so it's on you to spot when an upstream `values.yaml` wouldn't merge cleanly. If you'd rather have a check that can block the merge, set `STATUS_CONTEXT`.
+A conflict fails the job, so your CI goes red on its own. What you don't get from that is a named check for a branch protection rule, which is what `STATUS_CONTEXT` is for.
 
 `STATUS_CONTEXT` does two jobs: setting it switches the feature on, and whatever you set it to becomes the name of the status that gets posted. Leave it unset and nothing changes from before.
 
@@ -71,7 +73,7 @@ The status goes on via the GitHub Commit Status API (`POST /repos/{owner}/{repo}
 What you'll get:
 
 - `success`: every affected chart's `values.yaml` merged cleanly, or upstream's `values.yaml` didn't change. No `.rej` files lying around.
-- `failure`: at least one chart has a `values.yaml.rej`, so the upstream patch wouldn't apply on its own and you'll need to merge it by hand. The `.rej` never gets committed, the commit stays clean. When the patch fails the helper throws away the half-patched `values.yaml` and leaves it at the merge base, so every later run patches again and writes the `.rej` back out on disk. Nothing has to live in git for the check to stay red. To clear it, edit `values.yaml` yourself. Once it differs from the merge base the helper backs off, no `.rej` gets written, and the next run goes green.
+- `failure`: at least one chart hit a conflict and needs merging by hand. The helper also exits non-zero here, whether or not you set `STATUS_CONTEXT`. The `.rej` never gets committed and the commit stays clean: the conflicted merge is thrown away and `values.yaml` left at the merge base, so every later run merges again and writes the `.rej` back out on disk. Nothing has to live in git for the check to stay red. To clear it, edit `values.yaml` yourself. Once it differs from the merge base the helper backs off, no `.rej` gets written, and the next run goes green.
 - `error`: the helper itself fell over. It posts an `error` status and exits non-zero so you can see what happened in the CI logs.
 
 Setting `STATUS_CONTEXT` only posts the status, it won't stop anything on its own. To actually block a bad PR, add a branch protection rule on your target branch with a required status check named the same as your `STATUS_CONTEXT`. With that in place a `failure` status keeps the PR from merging, so it never lands on the target branch until you've sorted out `values.yaml` by hand.
