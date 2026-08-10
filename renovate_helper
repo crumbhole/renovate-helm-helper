@@ -7,6 +7,7 @@ Currently only deals with Chart.yamls
 import os
 import subprocess
 import logging
+import sys
 from urllib.error import HTTPError
 
 from ghapi.all import GhApi, paged
@@ -23,6 +24,9 @@ COMMENT_HEADER_VALUES='Renovate-helper bot has mangled values.yaml for you'
 # past that limit for large charts (e.g. loki), so cap the body and flag the
 # truncation rather than crashing the whole run.
 MAX_COMMENT_CHARS=65536
+
+# Lines shown either side of a conflict in the PR comment.
+CONFLICT_CONTEXT=3
 
 def read_file(path):
     with open(path,"r",encoding="utf8") as f:
@@ -63,27 +67,71 @@ def file_exists_at_sha(file_path, sha):
                          check=False)
     return result.returncode == 0
 
-def diff_with_sha(file_path, sha):
+def write_sha_copy(file_path, sha):
+    '''
+    Drop file_path as it was at `sha` next to the working copy, and return
+    where it landed. The caller unlinks it.
+    '''
     sha_file_path = f"{fs_path(file_path)}.other"
-
     sha_file_contents = run_capture(f"git show {sha}:{file_path}", checkoutPath)
     write_file(sha_file_path, sha_file_contents.stdout.decode('utf-8'))
+    return sha_file_path
+
+def diff_with_sha(file_path, sha):
+    sha_file_path = write_sha_copy(file_path, sha)
     diff = run_capture(f"diff -u {sha_file_path} {fs_path(file_path)}", checkoutPath, check=False)
     os.unlink(sha_file_path)
     return diff
+
+def merge_values(values_fs_path, base_fs_path, theirs_fs_path):
+    '''
+    Three-way merge the upstream change into values.yaml and hand back
+    (merged text, conflicted). Nothing is written: -p keeps the result on
+    stdout so a conflicted merge never touches the working copy.
+
+    A diff of old-vs-new upstream cannot express a value both sides moved to
+    the same place. `patch` reads one of those as a reversed hunk and walks
+    away from the whole file, silently dropping every other hunk with it. A
+    merge calls it what it is - a convergent change - and applies the rest.
+
+    git merge-file exits 255 on a real error and otherwise returns how many
+    conflicts it left, so only 255 is worth raising on.
+    '''
+    result = run_capture(f"git merge-file -p --diff3 -L ours -L base -L theirs "
+                         f"{values_fs_path} {base_fs_path} {theirs_fs_path}",
+                         checkoutPath, check=False)
+    if result.returncode == 255:
+        raise RuntimeError("git merge-file failed: "
+                           f"{result.stderr.decode('utf-8')}")
+    return result.stdout.decode('utf-8'), result.returncode > 0
+
+def conflict_regions(merged):
+    '''
+    Pull just the conflicted stretches out of a merged file, each with a few
+    lines either side. Whole charts run to thousands of lines and the comment
+    they end up in is capped at 65536 characters, so the file itself will not
+    fit for anything loki-sized.
+    '''
+    lines = merged.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.startswith('<<<<<<<')]
+    ends = [i for i, line in enumerate(lines) if line.startswith('>>>>>>>')]
+    regions = ""
+    for start, end in zip(starts, ends):
+        regions += f"@@ values.yaml line {start + 1} @@\n"
+        regions += "".join(lines[max(0, start - CONFLICT_CONTEXT):
+                                 end + 1 + CONFLICT_CONTEXT])
+    return regions
 
 def update_values_comment(chart_dir):
     rej_path = fs_path(f"{chart_dir}/values.yaml.rej")
     if os.path.exists(rej_path):
         rejects = read_file(rej_path)
-        comment=f"<details>\n<summary>I'm sorry, but I didn't patch values.yaml in <code>{chart_dir}</code> completely. Here are the patches which failed:</summary>\n\n```diff\n"
+        comment=f"<details>\n<summary>I'm sorry, but I couldn't merge the new upstream values.yaml into <code>{chart_dir}</code> on my own. Here is what clashed:</summary>\n\n```\n"
         comment+=rejects
         comment+="```\n</details>\n"
         return comment
 
 def update_values(chart_dir, merge_base):
-    fs_chart_dir = fs_path(chart_dir)
-
     values_path = f"{chart_dir}/values.yaml"
     values_diff = diff_with_sha(values_path, merge_base)
     logging.info(values_diff.stdout.decode('utf-8'))
@@ -92,9 +140,8 @@ def update_values(chart_dir, merge_base):
         orig_path = f"{chart_dir}/orig-values.yaml"
         # First run for a chart: orig-values.yaml exists in the working tree
         # (update_orig_values just generated it) but not at the merge base, so
-        # there is no old-vs-new orig diff to derive a patch from. Skip the
-        # auto-merge instead of letting `git show <merge_base>:orig-values.yaml`
-        # blow up the run.
+        # there is no base to merge against. Skip the auto-merge instead of
+        # letting `git show <merge_base>:orig-values.yaml` blow up the run.
         if not file_exists_at_sha(orig_path, merge_base):
             logging.info(f"No orig-values.yaml at the merge base for "
                          f"{chart_dir}; skipping auto-merge")
@@ -102,24 +149,19 @@ def update_values(chart_dir, merge_base):
         logging.info(f"Attempting to update {values_path}")
         orig_diff = diff_with_sha(orig_path, merge_base)
         logging.info(orig_diff.stdout.decode('utf-8'))
-        patch_path = f"{fs_chart_dir}/patch"
-        write_file(patch_path, orig_diff.stdout.decode('utf-8'))
-        run_capture(f"patch -p0 {fs_path(values_path)} <{patch_path}", fs_chart_dir, check=False)
-        os.unlink(patch_path)
-        # A .rej means the patch did not apply cleanly. Never commit a partial
-        # merge: discard the half-patched values.yaml so the working tree stays
-        # identical to the merge base, and never stage the .rej. That keeps the
-        # commit clean AND makes the failure signal self-healing — because
-        # values.yaml is left untouched, every later run re-derives the same
-        # empty values_diff, re-runs the patch, and regenerates the .rej on disk
-        # for reject_comment / the commit-status check. A human resolves it by
-        # editing values.yaml themselves; the helper then backs off (non-empty
-        # values_diff) and the check goes green. The .rej is left on disk for
-        # this run's comment/status scan but is never added to the index.
+        base_path = write_sha_copy(orig_path, merge_base)
+        merged, conflicted = merge_values(fs_path(values_path), base_path,
+                                          fs_path(orig_path))
+        os.unlink(base_path)
+        # A conflicted merge is thrown away rather than committed: values.yaml
+        # stays at the merge base, so the next run merges again and writes the
+        # .rej back out. The .rej only feeds this run's comment and status, so
+        # it never gets staged. Edit values.yaml yourself to take over.
         rej_path = fs_path(f"{chart_dir}/values.yaml.rej")
-        if os.path.exists(rej_path):
-            run_capture(f"git checkout -- {values_path}", checkoutPath)
+        if conflicted:
+            write_file(rej_path, conflict_regions(merged))
         else:
+            write_file(fs_path(values_path), merged)
             repo.index.add(fs_path(values_path))
 
 def handle_chart(chart_path, merge_base):
@@ -299,8 +341,9 @@ def main():
         if failed:
             set_commit_status('failure',
                               'values.yaml needs a manual merge - see the PR comment')
-        else:
-            set_commit_status('success', 'values.yaml is up to date with upstream')
+            # Red job even for repos that never set STATUS_CONTEXT.
+            sys.exit(1)
+        set_commit_status('success', 'values.yaml is up to date with upstream')
     except Exception:
         set_commit_status('error', 'renovate-helm-helper failed - see CI logs')
         raise
