@@ -11,11 +11,13 @@ available:
         python3 test_renovate_helper.py
 '''
 import importlib.util
+import inspect
 import os
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 
+from ghapi.all import sync_paged, APIError
 from git import Repo
 
 
@@ -366,6 +368,46 @@ class MainFlowTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             rhh.main()
         self.assertEqual(self.status, ["error"])
+
+
+class GhapiContractTests(unittest.TestCase):
+    '''
+    Every other test in here swaps in a FakeApi, so the suite stayed green
+    while ghapi 2.0 turned all these calls into coroutines and the released
+    image died on startup. These poke the real client instead. Nothing here
+    touches the network -- ghapi builds its endpoint groups from bundled
+    metadata, so constructing a client and reading it back is all local.
+    '''
+
+    OPS = [("issues", "list_comments"), ("issues", "create_comment"),
+           ("issues", "update_comment"), ("issues", "delete_comment"),
+           ("repos", "create_commit_status"), ("pulls", "get"),
+           ("users", "get_authenticated")]
+
+    def setUp(self):
+        self.api = rhh.make_api("unused", "o", "r")
+
+    def test_every_endpoint_we_call_exists(self):
+        for group, op in self.OPS:
+            with self.subTest(op=f"{group}.{op}"):
+                self.assertTrue(hasattr(getattr(self.api, group, None), op),
+                                f"ghapi no longer exposes {group}.{op}")
+
+    def test_endpoints_are_blocking(self):
+        for group, op in self.OPS:
+            with self.subTest(op=f"{group}.{op}"):
+                call = getattr(getattr(self.api, group), op).__call__
+                self.assertFalse(inspect.iscoroutinefunction(call),
+                                 f"{group}.{op} returns a coroutine; "
+                                 "the script never awaits one")
+
+    def test_sync_paged_iterates_without_awaiting(self):
+        pages = sync_paged(lambda **kw: [] if kw["page"] > 1 else ["a", "b"])
+        self.assertEqual(list(pages), [["a", "b"]])
+
+    def test_apierror_carries_an_int_status_code(self):
+        # e.code is the string 403 in 2.x, so the fallback must read status_code.
+        self.assertEqual(403, APIError("nope", status_code=403).status_code)
 
 
 if __name__ == "__main__":

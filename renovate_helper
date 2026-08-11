@@ -8,9 +8,8 @@ import os
 import subprocess
 import logging
 import sys
-from urllib.error import HTTPError
 
-from ghapi.all import GhApi, paged
+from ghapi.all import GhApi, sync_paged, APIError
 from git import Repo, Actor
 #from diff_match_patch import diff_match_patch
 import difflib as dl
@@ -253,7 +252,7 @@ def upsert_comment(header, body, delete_on_empty=False):
     if empty and not delete_on_empty:
         return
     full_body = truncate_comment(header+"\n"+body)
-    for page in paged(api.issues.list_comments, issue_number=prNum):
+    for page in sync_paged(api.issues.list_comments, issue_number=prNum):
         for comment in page:
             if comment.user.login != bot_login:
                 continue
@@ -292,6 +291,13 @@ def reject_comment(chart_dirs):
             failed = True
             comment += chart_comment
     return comment, failed
+
+def make_api(gh_token, gh_owner, gh_repo):
+    '''
+    Build the GitHub client. ghapi hands back coroutines unless you ask for
+    sync, and nothing in this script awaits anything.
+    '''
+    return GhApi(token=gh_token, owner=gh_owner, repo=gh_repo, sync=True)
 
 def set_commit_status(state, description):
     '''
@@ -368,9 +374,7 @@ if __name__ == '__main__':
 
     repo = Repo(checkoutPath)
     assert not repo.bare
-    api = GhApi(token=token,
-                owner=GH_OWNER,
-                repo=appRepo)
+    api = make_api(token, GH_OWNER, appRepo)
 
     # Target branch is derived from the PR via the GH API. TARGET_BRANCH is
     # still honoured as an override for local testing or odd CI shapes, but
@@ -378,12 +382,12 @@ if __name__ == '__main__':
     targetBranch = (os.environ.get('TARGET_BRANCH') or '').strip() or api.pulls.get(prNum).base.ref
     try:
         bot_login = api.users.get_authenticated().login
-    except HTTPError as e:
+    except APIError as e:
         # GET /user is not accessible to the GitHub Actions GITHUB_TOKEN —
         # it responds 403 "Resource not accessible by integration". Other
         # HTTP errors (network, auth misconfigured, rate-limit, etc.) are
         # genuine failures and should still surface.
-        if e.code != 403:
+        if e.status_code != 403:
             raise
         # Fall back to an explicit BOT_LOGIN env var, defaulting to GIT_NAME
         # — which matches how this bot's comments are attributed when posted
