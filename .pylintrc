@@ -1,0 +1,3 @@
+[TYPECHECK]
+# GhApi builds its endpoint groups per instance, so pylint never sees api.issues and friends.
+ignored-classes=GhApi
