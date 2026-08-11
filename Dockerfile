@@ -1,4 +1,4 @@
-FROM python:3.14.6
+FROM python:3.14.7
 # sync=True and sync_paged only landed in 2.x.
 RUN pip install 'ghapi>=2'
 RUN pip install GitPython
