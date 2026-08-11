@@ -1,4 +1,4 @@
-FROM python:3.14.6
+FROM python:3.14.7
 # ghapi 2.x went async and this script didn't.
 RUN pip install 'ghapi<2'
 RUN pip install GitPython
